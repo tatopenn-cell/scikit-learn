@@ -1170,12 +1170,19 @@ def test_randomized_range_finder_array_api_compliance(
 
 
 def test_incremental_mean_and_var_large_values_no_overflow():
-    """Non-regression test for issue #5602.
+    """Non-regression test for issue #5602, mean path.
 
-    ``StandardScaler.partial_fit`` used to overflow to ``inf`` on long
-    streams with large values, because the cumulative sum
-    ``last_mean * last_sample_count`` was reconstructed. The delta-based
-    update of Chan, Golub and LeVeque (1979) never reconstructs the sum.
+    On the original code the mean overflows to inf after a few batches.
+    The delta-based fallback for the mean keeps it finite.
+
+    The variance overflow (with_std=True) is a separate pre-existing bug:
+    ``new_unnormalized_variance`` is computed as
+    ``sum((X - T) ** 2) - correction ** 2 / n`` before the merge, and for
+    constant data at 1.79e301 this expression overflows to inf - inf = nan
+    at the very first iteration, before any delta-based merge runs. The
+    delta-based merge cannot fix a nan that is produced upstream. The
+    variance overflow is therefore out of scope of this PR and is declared
+    in the case study.
     """
     rng = np.random.RandomState(0)
     max_f = np.finfo(np.float64).max / 1e5
@@ -1204,4 +1211,22 @@ def test_incremental_mean_and_var_constant_values():
 
     assert_allclose(iscaler.mean_, scaler.mean_, rtol=1e-12)
     assert_allclose(iscaler.var_, scaler.var_, atol=1e-15)
+def test_incremental_mean_and_var_with_std_false_overflow():
+    """Non-regression test: with_std=False at 1.79e301.
 
+    With_std=False skips the variance path. Only the mean fallback fires.
+    """
+    rng = np.random.RandomState(2)
+    max_f = np.finfo(np.float64).max / 1e5
+    min_f = max_f / 1e2
+    batch = rng.uniform(min_f, min_f, size=(500000, 1))
+
+    scaler = StandardScaler(with_std=False).fit(batch)
+
+    iscaler = StandardScaler(with_std=False)
+    for _ in range(100):
+        iscaler = iscaler.partial_fit(batch)
+
+    assert np.isfinite(iscaler.mean_).all()
+    assert_allclose(iscaler.mean_, scaler.mean_, rtol=1e-10)
+    assert iscaler.var_ is None
